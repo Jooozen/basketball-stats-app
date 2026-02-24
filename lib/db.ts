@@ -361,3 +361,21 @@ export async function getPlayerCountByTeamId(teamId: number): Promise<number> {
   );
   return row?.count ?? 0;
 }
+
+// 試合のスコアを取得（JOINなしで軽量に）
+export async function getGameScore(gameId: number, myTeamId: number, opponentTeamId: number): Promise<{ myScore: number; oppScore: number }> {
+  const db = getDb();
+  let myScore = 0;
+  let oppScore = 0;
+
+  const rows = await db.getAllAsync<{ team_id: number; action: string }>(
+    "SELECT team_id, action FROM stat_events WHERE game_id = ? AND action IN ('pts2', 'pts3', 'ft')",
+    [gameId]
+  );
+  for (const r of rows) {
+    const pts = r.action === 'pts3' ? 3 : r.action === 'pts2' ? 2 : 1;
+    if (r.team_id === myTeamId) myScore += pts;
+    else if (r.team_id === opponentTeamId) oppScore += pts;
+  }
+  return { myScore, oppScore };
+}
