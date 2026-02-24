@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View, Text, StyleSheet, Pressable, ScrollView,
-  Modal, TextInput,
+  Modal, TextInput, Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -9,14 +9,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/colors';
 import {
   getGameById, getTeamById, getPlayersByTeamId,
-  getEventsByGameId, insertStatEvent,
+  getEventsByGameId, insertStatEvent, deleteStatEvent,
   updateGame,
 } from '@/lib/db';
 import { useGameStore } from '@/lib/store';
+import { calcPlayerStats, emptyStats, mergeStats } from '@/lib/stats';
+import CourtSvg from '@/components/CourtSvg';
 import {
-  GAME_CATEGORY_CONFIG,
-  type Game, type Team, type Player, type StatEvent,
-  type StatAction, type GameCategory, type GameCategoryConfig,
+  GAME_CATEGORY_CONFIG, SHOT_ZONE_INFO,
+  type Game, type Team, type Player, type StatEvent, type PlayerStats,
+  type StatAction, type GameCategory, type GameCategoryConfig, type ShotZone,
 } from '@/lib/types';
 
 // ============================================================
@@ -86,6 +88,9 @@ export default function GameStatsScreen() {
   const [showStartingLineup, setShowStartingLineup] = useState(false);
   const [showMemberChange, setShowMemberChange] = useState(false);
   const [showTimerInput, setShowTimerInput] = useState(false);
+  const [showCourtShot, setShowCourtShot] = useState(false);
+  const [showStatsPanel, setShowStatsPanel] = useState(false);
+  const [showTimeline, setShowTimeline] = useState(false);
 
   // ポゼッション
   const [possession, setPossession] = useState<'my' | 'opp'>('my');
@@ -458,6 +463,69 @@ export default function GameStatsScreen() {
     showFB(`交代: #${pO?.number} OUT → #${pI?.number} IN`);
   }
 
+  // コート図シュート記録
+  async function handleCourtShot(zone: ShotZone, is3pt: boolean, made: boolean) {
+    if (!selectedPlayerId || !selectedTeamId) {
+      showFB('選手を選択してください');
+      return;
+    }
+    const action: StatAction = made
+      ? (is3pt ? 'pts3' : 'pts2')
+      : (is3pt ? 'miss3' : 'miss2');
+    const gt = getGameTime();
+    const ev = {
+      game_id: gameId,
+      player_id: selectedPlayerId,
+      team_id: selectedTeamId,
+      quarter,
+      action,
+      timestamp: new Date().toISOString(),
+      game_time: gt,
+      zone,
+    };
+    const id = await insertStatEvent(ev);
+    useGameStore.setState({ lastEvent: { ...ev, id } as StatEvent & { id: number } });
+    await reloadEvents();
+    const allP = [...myPlayers, ...oppPlayers];
+    const p = allP.find(pl => pl.id === selectedPlayerId);
+    const zoneLabel = SHOT_ZONE_INFO[zone].label;
+    showFB(`#${p?.number} ${made ? '成功' : '失敗'} ${is3pt ? '3P' : '2P'} (${zoneLabel})`);
+  }
+
+  // タイムラインイベント削除
+  async function handleDeleteEvent(eventId: number) {
+    Alert.alert('確認', 'このイベントを削除しますか？', [
+      { text: 'キャンセル', style: 'cancel' },
+      {
+        text: '削除', style: 'destructive',
+        onPress: async () => {
+          await deleteStatEvent(eventId);
+          await reloadEvents();
+          showFB('イベントを削除しました');
+        },
+      },
+    ]);
+  }
+
+  // 試合終了
+  function handleEndGame() {
+    Alert.alert('試合終了', 'この試合を終了しますか？', [
+      { text: 'キャンセル', style: 'cancel' },
+      {
+        text: '終了', style: 'destructive',
+        onPress: async () => {
+          if (timerRunning) setTimerRunning(false);
+          await updateGame(gameId, {
+            status: 'finished' as const,
+            timer_running: 0,
+            timer_started_at: null,
+          });
+          router.replace(`/games/${gameId}/summary`);
+        },
+      },
+    ]);
+  }
+
   // ============================================================
   // ローディング
   // ============================================================
@@ -691,20 +759,30 @@ export default function GameStatsScreen() {
         </View>
       </View>
 
-      {/* ═══════════ アクションバー ═══════════ */}
-      <View style={[styles.actionBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-        <Pressable style={styles.undoBtn} onPress={handleUndo}>
-          <Text style={styles.actionText}>戻す</Text>
-        </Pressable>
-        <Pressable style={styles.memberBtn} onPress={() => setShowMemberChange(true)}>
-          <Text style={styles.actionText}>メンバーチェンジ</Text>
-        </Pressable>
-        <Pressable
-          style={styles.summaryBtn}
-          onPress={() => router.push(`/games/${gameId}/summary`)}
-        >
-          <Text style={styles.actionText}>サマリー</Text>
-        </Pressable>
+      {/* ═══════════ アクションバー (2行) ═══════════ */}
+      <View style={styles.actionSection}>
+        <View style={styles.actionRow}>
+          <Pressable style={styles.undoBtn} onPress={handleUndo}>
+            <Text style={styles.actionText}>戻す</Text>
+          </Pressable>
+          <Pressable style={styles.courtBtn} onPress={() => setShowCourtShot(true)}>
+            <Text style={styles.actionText}>コート図</Text>
+          </Pressable>
+          <Pressable style={styles.memberBtn} onPress={() => setShowMemberChange(true)}>
+            <Text style={styles.actionText}>メンバーチェンジ</Text>
+          </Pressable>
+        </View>
+        <View style={[styles.actionRow, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+          <Pressable style={styles.statsTabBtn} onPress={() => setShowStatsPanel(true)}>
+            <Text style={styles.actionText}>スタッツ</Text>
+          </Pressable>
+          <Pressable style={styles.timelineBtn} onPress={() => setShowTimeline(true)}>
+            <Text style={styles.actionText}>タイムライン</Text>
+          </Pressable>
+          <Pressable style={styles.endGameBtn} onPress={handleEndGame}>
+            <Text style={styles.actionText}>試合終了</Text>
+          </Pressable>
+        </View>
       </View>
 
       {/* ═══════════ スターティングラインアップ ═══════════ */}
@@ -733,6 +811,44 @@ export default function GameStatsScreen() {
           oppTeamLabel={oppTeamLabel}
           onSubstitute={handleSubstitution}
           onClose={() => setShowMemberChange(false)}
+          topInset={insets.top}
+        />
+      )}
+
+      {/* ═══════════ コート図シュートパネル ═══════════ */}
+      {showCourtShot && (
+        <CourtShotPanel
+          selectedPlayerId={selectedPlayerId}
+          events={events}
+          onShot={handleCourtShot}
+          onClose={() => setShowCourtShot(false)}
+          topInset={insets.top}
+        />
+      )}
+
+      {/* ═══════════ スタッツ一覧パネル ═══════════ */}
+      {showStatsPanel && (
+        <StatsPanel
+          events={events}
+          myPlayers={myPlayers}
+          oppPlayers={oppPlayers}
+          myTeamId={game.my_team_id}
+          virtualOppTeamId={virtualOppTeamId}
+          isIntraSquad={isIntraSquad}
+          myTeamLabel={myTeamLabel}
+          oppTeamLabel={oppTeamLabel}
+          onClose={() => setShowStatsPanel(false)}
+          topInset={insets.top}
+        />
+      )}
+
+      {/* ═══════════ タイムラインパネル ═══════════ */}
+      {showTimeline && (
+        <TimelinePanel
+          events={events}
+          allPlayers={[...myPlayers, ...oppPlayers]}
+          onDelete={handleDeleteEvent}
+          onClose={() => setShowTimeline(false)}
           topInset={insets.top}
         />
       )}
@@ -1073,6 +1189,278 @@ function MemberChangePanel({ isIntraSquad, myTeamId, myCourt, oppCourt, myBench,
 }
 
 // ============================================================
+// CourtShotPanel — コート図シュート記録
+// ============================================================
+
+function CourtShotPanel({ selectedPlayerId, events, onShot, onClose, topInset }: {
+  selectedPlayerId: number | null;
+  events: StatEvent[];
+  onShot: (zone: ShotZone, is3pt: boolean, made: boolean) => void;
+  onClose: () => void;
+  topInset: number;
+}) {
+  const [pendingZone, setPendingZone] = useState<{ zone: ShotZone; is3pt: boolean } | null>(null);
+
+  const shotEvents = useMemo(() =>
+    events
+      .filter(e => e.player_id === selectedPlayerId && e.zone)
+      .map(e => ({ zone: e.zone!, action: e.action })),
+    [events, selectedPlayerId]);
+
+  function handleZoneTap(zone: ShotZone, is3pt: boolean) {
+    setPendingZone({ zone, is3pt });
+  }
+
+  function handleResult(made: boolean) {
+    if (!pendingZone) return;
+    onShot(pendingZone.zone, pendingZone.is3pt, made);
+    setPendingZone(null);
+  }
+
+  return (
+    <View style={[styles.overlayFull, { paddingTop: topInset }]}>
+      <View style={styles.mcHeader}>
+        <Text style={styles.mcTitle}>シュートチャート</Text>
+        <Pressable onPress={onClose} style={styles.mcCloseBtn}>
+          <Text style={styles.mcCloseText}>✕ 閉じる</Text>
+        </Pressable>
+      </View>
+
+      {!selectedPlayerId && (
+        <Text style={[styles.mcHint, { marginTop: 40 }]}>
+          先に選手を選択してからコート図を開いてください
+        </Text>
+      )}
+
+      {selectedPlayerId && (
+        <View style={styles.courtWrap}>
+          <CourtSvg
+            onZoneTap={handleZoneTap}
+            disabled={!!pendingZone}
+            shotEvents={shotEvents}
+          />
+
+          {pendingZone && (
+            <View style={styles.shotChoiceOverlay}>
+              <Text style={styles.shotChoiceTitle}>
+                {SHOT_ZONE_INFO[pendingZone.zone].label} — {pendingZone.is3pt ? '3P' : '2P'}
+              </Text>
+              <View style={styles.shotChoiceRow}>
+                <Pressable
+                  style={[styles.shotChoiceBtn, { backgroundColor: Colors.success }]}
+                  onPress={() => handleResult(true)}
+                >
+                  <Text style={styles.shotChoiceBtnText}>成功</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.shotChoiceBtn, { backgroundColor: Colors.danger }]}
+                  onPress={() => handleResult(false)}
+                >
+                  <Text style={styles.shotChoiceBtnText}>失敗</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.shotChoiceBtn, { backgroundColor: Colors.surfaceLight }]}
+                  onPress={() => setPendingZone(null)}
+                >
+                  <Text style={styles.shotChoiceBtnText}>キャンセル</Text>
+                </Pressable>
+              </View>
+            </View>
+          )}
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ============================================================
+// StatsPanel — スタッツ一覧
+// ============================================================
+
+function StatsPanel({ events, myPlayers, oppPlayers, myTeamId, virtualOppTeamId, isIntraSquad, myTeamLabel, oppTeamLabel, onClose, topInset }: {
+  events: StatEvent[];
+  myPlayers: Player[];
+  oppPlayers: Player[];
+  myTeamId: number;
+  virtualOppTeamId: number;
+  isIntraSquad: boolean;
+  myTeamLabel: string;
+  oppTeamLabel: string;
+  onClose: () => void;
+  topInset: number;
+}) {
+  const [tab, setTab] = useState<'my' | 'opp'>('my');
+
+  const players = tab === 'my' ? myPlayers : (isIntraSquad ? myPlayers : oppPlayers);
+  const teamId = tab === 'my' ? myTeamId : virtualOppTeamId;
+
+  // 紅白戦のB側選手フィルター用
+  const playerStatsData = useMemo(() => {
+    const result: { player: Player; stats: PlayerStats }[] = [];
+    let teamTotal = emptyStats();
+
+    for (const p of players) {
+      const pEvents = events.filter(e => {
+        if (e.player_id !== p.id) return false;
+        if (isIntraSquad) return e.team_id === teamId;
+        return true;
+      });
+      const st = calcPlayerStats(pEvents);
+      result.push({ player: p, stats: st });
+      teamTotal = mergeStats(teamTotal, st);
+    }
+    return { rows: result, total: teamTotal };
+  }, [events, players, teamId, isIntraSquad]);
+
+  const COLS = ['PTS', 'FG', '3P', 'FT', 'REB', 'AST', 'STL', 'BLK', 'TO', 'FOUL'];
+
+  function statCell(s: PlayerStats, col: string): string {
+    switch (col) {
+      case 'PTS': return String(s.pts);
+      case 'FG': return `${s.fg}/${s.fga}`;
+      case '3P': return `${s.tp}/${s.tpa}`;
+      case 'FT': return `${s.ft}/${s.fta}`;
+      case 'REB': return String(s.reb);
+      case 'AST': return String(s.ast);
+      case 'STL': return String(s.stl);
+      case 'BLK': return String(s.blk);
+      case 'TO': return String(s.to);
+      case 'FOUL': return String(s.foul);
+      default: return '';
+    }
+  }
+
+  return (
+    <View style={[styles.overlayFull, { paddingTop: topInset }]}>
+      <View style={styles.mcHeader}>
+        <Text style={styles.mcTitle}>スタッツ一覧</Text>
+        <Pressable onPress={onClose} style={styles.mcCloseBtn}>
+          <Text style={styles.mcCloseText}>✕ 閉じる</Text>
+        </Pressable>
+      </View>
+
+      {/* タブ切替 */}
+      <View style={styles.spTabRow}>
+        <Pressable
+          style={[styles.spTab, tab === 'my' && styles.spTabActiveMy]}
+          onPress={() => setTab('my')}
+        >
+          <Text style={[styles.spTabText, tab === 'my' && styles.spTabTextActive]}>{myTeamLabel}</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.spTab, tab === 'opp' && styles.spTabActiveOpp]}
+          onPress={() => setTab('opp')}
+        >
+          <Text style={[styles.spTabText, tab === 'opp' && styles.spTabTextActive]}>{oppTeamLabel}</Text>
+        </Pressable>
+      </View>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+        <View>
+          {/* ヘッダー */}
+          <View style={styles.spHeaderRow}>
+            <Text style={[styles.spCell, styles.spNameCell, styles.spHeaderText]}>#</Text>
+            <Text style={[styles.spCell, styles.spNameCell, styles.spHeaderText]}>名前</Text>
+            {COLS.map(c => (
+              <Text key={c} style={[styles.spCell, styles.spHeaderText]}>{c}</Text>
+            ))}
+          </View>
+
+          {/* 選手行 */}
+          <ScrollView style={{ maxHeight: 400 }}>
+            {playerStatsData.rows.map(({ player, stats }) => (
+              <View key={player.id} style={styles.spRow}>
+                <Text style={[styles.spCell, styles.spNameCell, styles.spNumText]}>
+                  {player.number}
+                </Text>
+                <Text style={[styles.spCell, styles.spNameCell]} numberOfLines={1}>
+                  {player.name || `選手${player.number}`}
+                </Text>
+                {COLS.map(c => (
+                  <Text key={c} style={styles.spCell}>{statCell(stats, c)}</Text>
+                ))}
+              </View>
+            ))}
+
+            {/* 合計行 */}
+            <View style={[styles.spRow, styles.spTotalRow]}>
+              <Text style={[styles.spCell, styles.spNameCell, styles.spTotalText]}>合計</Text>
+              <Text style={[styles.spCell, styles.spNameCell]} />
+              {COLS.map(c => (
+                <Text key={c} style={[styles.spCell, styles.spTotalText]}>
+                  {statCell(playerStatsData.total, c)}
+                </Text>
+              ))}
+            </View>
+          </ScrollView>
+        </View>
+      </ScrollView>
+    </View>
+  );
+}
+
+// ============================================================
+// TimelinePanel — タイムライン
+// ============================================================
+
+function TimelinePanel({ events, allPlayers, onDelete, onClose, topInset }: {
+  events: StatEvent[];
+  allPlayers: Player[];
+  onDelete: (eventId: number) => void;
+  onClose: () => void;
+  topInset: number;
+}) {
+  const ACTION_LABELS: Record<string, string> = {
+    pts2: '2P成功', pts3: '3P成功', ft: 'FT成功',
+    miss2: '2Pミス', miss3: '3Pミス', missFt: 'FTミス',
+    reb: 'REB', ast: 'AST', stl: 'STL', blk: 'BLK',
+    to: 'TO', foul: 'FOUL', subIn: 'IN', subOut: 'OUT', timeout: 'タイムアウト',
+  };
+
+  // 新しいイベントが上に来るように逆順
+  const reversed = useMemo(() => [...events].reverse(), [events]);
+
+  return (
+    <View style={[styles.overlayFull, { paddingTop: topInset }]}>
+      <View style={styles.mcHeader}>
+        <Text style={styles.mcTitle}>タイムライン</Text>
+        <Pressable onPress={onClose} style={styles.mcCloseBtn}>
+          <Text style={styles.mcCloseText}>✕ 閉じる</Text>
+        </Pressable>
+      </View>
+
+      <ScrollView style={styles.mcBody}>
+        {reversed.length === 0 && (
+          <Text style={styles.mcHint}>まだ記録がありません</Text>
+        )}
+        {reversed.map(ev => {
+          const p = allPlayers.find(pl => pl.id === ev.player_id);
+          const label = ACTION_LABELS[ev.action] || ev.action;
+          const timeStr = ev.game_time != null ? formatTime(ev.game_time) : '';
+          const zoneStr = ev.zone ? ` (${SHOT_ZONE_INFO[ev.zone as ShotZone]?.label || ev.zone})` : '';
+
+          return (
+            <View key={ev.id} style={styles.tlRow}>
+              <View style={styles.tlInfo}>
+                <Text style={styles.tlQuarter}>Q{ev.quarter}</Text>
+                {timeStr !== '' && <Text style={styles.tlTime}>{timeStr}</Text>}
+                <Text style={styles.tlPlayer}>
+                  {ev.player_id === 0 ? '' : `#${p?.number ?? '?'} ${p?.name || ''}`}
+                </Text>
+                <Text style={styles.tlAction}>{label}{zoneStr}</Text>
+              </View>
+              <Pressable onPress={() => onDelete(ev.id)} style={styles.tlDeleteBtn}>
+                <Text style={styles.tlDeleteText}>削除</Text>
+              </Pressable>
+            </View>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+// ============================================================
 // スタイル
 // ============================================================
 
@@ -1223,22 +1611,33 @@ const styles = StyleSheet.create({
   statBtnTextOff: { color: 'rgba(255,255,255,0.3)' },
 
   // ─── アクションバー ───
-  actionBar: {
-    flexDirection: 'row', gap: 6, paddingHorizontal: 8, paddingTop: 4,
-  },
+  actionSection: { paddingHorizontal: 8, gap: 4, paddingTop: 4 },
+  actionRow: { flexDirection: 'row', gap: 4 },
   undoBtn: {
     flex: 1, backgroundColor: '#a16207', borderRadius: 10,
-    paddingVertical: 12, alignItems: 'center',
+    paddingVertical: 10, alignItems: 'center',
+  },
+  courtBtn: {
+    flex: 1, backgroundColor: '#6d28d9', borderRadius: 10,
+    paddingVertical: 10, alignItems: 'center',
   },
   memberBtn: {
     flex: 1.5, backgroundColor: '#0f766e', borderRadius: 10,
-    paddingVertical: 12, alignItems: 'center',
+    paddingVertical: 10, alignItems: 'center',
   },
-  summaryBtn: {
+  statsTabBtn: {
     flex: 1, backgroundColor: Colors.info, borderRadius: 10,
-    paddingVertical: 12, alignItems: 'center',
+    paddingVertical: 10, alignItems: 'center',
   },
-  actionText: { fontSize: 14, fontWeight: 'bold', color: Colors.white },
+  timelineBtn: {
+    flex: 1, backgroundColor: '#475569', borderRadius: 10,
+    paddingVertical: 10, alignItems: 'center',
+  },
+  endGameBtn: {
+    flex: 1, backgroundColor: Colors.danger, borderRadius: 10,
+    paddingVertical: 10, alignItems: 'center',
+  },
+  actionText: { fontSize: 13, fontWeight: 'bold', color: Colors.white },
 
   // ─── オーバーレイ共通 ───
   overlayFull: {
@@ -1341,4 +1740,73 @@ const styles = StyleSheet.create({
     paddingVertical: 12, alignItems: 'center',
   },
   modalConfirmText: { fontSize: 16, fontWeight: 'bold', color: Colors.white },
+
+  // ─── コート図パネル ───
+  courtWrap: {
+    flex: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: 24, paddingBottom: 24,
+  },
+  shotChoiceOverlay: {
+    position: 'absolute', bottom: 40, left: 24, right: 24,
+    backgroundColor: Colors.surface, borderRadius: 14,
+    padding: 16, alignItems: 'center',
+  },
+  shotChoiceTitle: {
+    fontSize: 16, fontWeight: 'bold', color: Colors.text, marginBottom: 12,
+  },
+  shotChoiceRow: { flexDirection: 'row', gap: 8 },
+  shotChoiceBtn: {
+    flex: 1, paddingVertical: 14, borderRadius: 10, alignItems: 'center',
+  },
+  shotChoiceBtnText: { fontSize: 16, fontWeight: 'bold', color: Colors.white },
+
+  // ─── スタッツパネル ───
+  spTabRow: {
+    flexDirection: 'row', gap: 8, paddingHorizontal: 16, marginBottom: 8,
+  },
+  spTab: {
+    flex: 1, paddingVertical: 10, borderRadius: 10,
+    backgroundColor: Colors.surfaceLight, alignItems: 'center',
+  },
+  spTabActiveMy: { backgroundColor: Colors.teamMy },
+  spTabActiveOpp: { backgroundColor: Colors.teamOpp },
+  spTabText: { fontSize: 14, fontWeight: 'bold', color: Colors.textMuted },
+  spTabTextActive: { color: Colors.white },
+  spHeaderRow: {
+    flexDirection: 'row', borderBottomWidth: 1, borderBottomColor: Colors.border,
+    paddingVertical: 6, paddingHorizontal: 8,
+  },
+  spHeaderText: { fontWeight: 'bold', color: Colors.textMuted, fontSize: 11 },
+  spRow: {
+    flexDirection: 'row', paddingVertical: 6, paddingHorizontal: 8,
+    borderBottomWidth: 1, borderBottomColor: 'rgba(255,255,255,0.05)',
+  },
+  spTotalRow: { backgroundColor: Colors.surfaceLight },
+  spCell: {
+    width: 48, fontSize: 12, color: Colors.text, textAlign: 'center',
+  },
+  spNameCell: { width: 60, textAlign: 'left' },
+  spNumText: { fontWeight: 'bold', color: Colors.white },
+  spTotalText: { fontWeight: 'bold', color: Colors.accent },
+
+  // ─── タイムライン ───
+  tlRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.surface, borderRadius: 8,
+    paddingHorizontal: 12, paddingVertical: 8, marginBottom: 4,
+  },
+  tlInfo: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  tlQuarter: {
+    fontSize: 11, fontWeight: 'bold', color: Colors.accent,
+    backgroundColor: Colors.surfaceLight, paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: 4, overflow: 'hidden',
+  },
+  tlTime: { fontSize: 11, color: Colors.textDim, fontVariant: ['tabular-nums'] },
+  tlPlayer: { fontSize: 13, fontWeight: '600', color: Colors.text },
+  tlAction: { fontSize: 12, color: Colors.textMuted },
+  tlDeleteBtn: {
+    paddingHorizontal: 10, paddingVertical: 6,
+    backgroundColor: 'rgba(220,38,38,0.2)', borderRadius: 6,
+  },
+  tlDeleteText: { fontSize: 11, fontWeight: 'bold', color: Colors.danger },
 });
