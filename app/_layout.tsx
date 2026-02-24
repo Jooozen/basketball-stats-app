@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { Slot } from 'expo-router';
+import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { initDatabase } from '@/lib/db';
 import { Colors } from '@/constants/colors';
@@ -35,18 +35,41 @@ export default function RootLayout() {
   }
 
   return (
-    <View style={styles.container}>
-      <Slot />
+    <>
+      <Stack
+        screenOptions={{
+          headerStyle: { backgroundColor: Colors.surface },
+          headerTintColor: Colors.text,
+          headerTitleStyle: { fontWeight: 'bold' },
+          contentStyle: { backgroundColor: Colors.background },
+        }}
+      >
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen
+          name="games/[gameId]/index"
+          options={{ headerShown: false }}
+        />
+        <Stack.Screen
+          name="games/[gameId]/summary"
+          options={{
+            title: '試合サマリー',
+            headerBackTitle: '戻る',
+          }}
+        />
+        <Stack.Screen
+          name="account"
+          options={{
+            title: 'アカウント設定',
+            headerBackTitle: '戻る',
+          }}
+        />
+      </Stack>
       <StatusBar style="light" />
-    </View>
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: Colors.background,
-  },
   center: {
     flex: 1,
     backgroundColor: Colors.background,
